@@ -1,0 +1,440 @@
+PCM-GAN 使用说明（2026-03 代码一致版）
+====================================
+
+说明
+- 以下命令以 Linux/bash 多行写法展示，服务器可直接使用。
+- 在 Windows PowerShell 中，可以改成单行执行。
+- 当前正式主线建议使用 DDRE-33 + 15min + 2ch_single。
+
+
+一、环境与数据说明
+------------------
+1) 依赖
+pip install torch pandas numpy tqdm flask matplotlib
+
+2) DDRE-33 目录
+- 全量数据: pcm_gan_data/ororiginal_data
+- 子集数据: pcm_gan_data/ddre33_subset
+
+3) 重要说明
+- 目录名是 ororiginal_data，命令里保持这个拼写。
+- DDRE-33 当前功率序列已经是归一化数据。
+- 因此当前主线命令不会再对 DDRE-33 的 x 数据做二次归一化。
+- 如果启用 --ddre33_curve_cond，建议默认使用：
+  --ddre33_curve_cond_norm none
+
+4) 标签范围
+- PV 标签: 0,1,2,3,4,5
+- Wind 标签: 0,1,2,3
+
+
+二、正式实验推荐顺序
+--------------------
+1) 第一步
+- 先跑稳定基线：
+  不开 curve_cond，不开事件损失
+
+2) 第二步
+- 再跑保守增强版：
+  开 curve_cond，事件损失用小权重
+
+3) 不建议
+- 不建议直接上 4ch 作为论文主结果
+- 不建议一开始把事件损失调得很大
+
+
+三、快速烟雾测试（子集，1 组即可）
+---------------------------------
+python -m pcm_gan.train 
+  --outdir pcm_gan_runs_smoke_2ch 
+  --dataset ddre33 --ddre33_mode 2ch_single --cond_onehot --resolution 15min 
+  --pv18_csv pcm_gan_data/ddre33_subset/node_18_PV.csv 
+  --pv33_csv pcm_gan_data/ddre33_subset/node_33_PV.csv 
+  --wind22_csv pcm_gan_data/ddre33_subset/node_22_wind.csv 
+  --wind25_csv pcm_gan_data/ddre33_subset/node_25_wind.csv 
+  --pv18_labels_csv pcm_gan_data/ddre33_subset/node_18_PV_labels_climate.csv 
+  --pv33_labels_csv pcm_gan_data/ddre33_subset/node_33_PV_labels_climate.csv 
+  --wind22_labels_csv pcm_gan_data/ddre33_subset/node_22_wind_labels.csv 
+  --wind25_labels_csv pcm_gan_data/ddre33_subset/node_25_wind_labels.csv 
+  --ddre33_static_cond --ddre33_date_cond 
+  --epochs 5 --batch 8 --lr 1e-4 --lr_d 2e-4 --d_steps 1 
+  --lambda_gp 1.0 --lambda_tail 0.08 --tail_qs 0.9,0.95 
+  --lambda_stats 0.05 --lambda_roll 0.05 --roll_win 8 
+  --lambda_acf 0.05 --acf_lags 6 --lambda_corr 0.02 
+  --lambda_wind_adv 1.5 --d_high_weight 0.3 
+  --val_ratio 0.3 --ema_decay 0.999 --ema_start_epoch 0 
+  --extreme_resample --extreme_joint_channels 0,1 --extreme_q 0.95 --extreme_alpha 0.3
+
+
+四、正式训练命令
+----------------
+实验编号说明（第 5 章建议统一用这 4 个缩写）
+- M0 = PCM-GAN-Base
+  已完成，对应目录：pcm_gan_runs_full_stage1_seed42
+  条件：onehot + date + static_cond
+  不开启 curve_cond，不开启 event losses
+- M1 = PCM-GAN-Base + CurveCond
+  需要新跑，对应目录：pcm_gan_runs_full_m1_curve_seed42
+  条件：M0 + curve_cond
+  不开启 event losses
+- M2 = PCM-GAN-Base + EventLoss
+  需要新跑，对应目录：pcm_gan_runs_full_m2_event_seed42
+  条件：与 M0 相同
+  仅开启 peak/ramp/active 三个事件损失
+- M3 = PCM-GAN-Full
+  已完成，对应目录：pcm_gan_runs_full_stage2_seed42
+  条件：M0 + curve_cond + event losses
+
+0) Windows 服务器默认建议
+- 你当前机器从 nvidia-smi 截图看是 2 张 RTX 5880。
+- Windows 服务器下，优先用“双卡并行”：
+  如果只同时跑两个任务，建议 M1 固定跑 GPU 0，M2 固定跑 GPU 1。
+  已经跑完的 M0 和 M3 结果保留不覆盖。
+- 在这个前提下，建议两边都先用：
+  --batch 128 --num_workers 4 --prefetch_factor 2 --train_metrics_every 100 --eval_every 10
+- 这样做的目的：
+  每张卡各自独占一个训练进程，同时减少批级统计和频繁验证带来的耗时。
+- 默认不要启用 --cache_gpu：
+  你的原始数据量较大，Windows 下更不建议两个进程同时把全量数据缓存到显存。
+- 不建议继续使用 --train_metrics_every 0：
+  这会跳过训练集上的重指标计算，metrics.csv 中对应训练指标会记为 NaN。
+- 推荐改为：
+  --train_metrics_every 100
+  这样每 100 个 batch 记录一次训练分布指标，速度和可读性更平衡。
+- --eval_every 10 的含义：
+  验证指标只在第 10、20、30... 轮刷新一次，中间轮次会沿用上一次验证结果。
+- 每次重新启动正式训练时，建议换一个新的 --outdir：
+  避免旧的 metrics.csv 被直接追加，导致同一个文件里出现多个 epoch=1。
+- 如果某一张卡显存仍然明显富余：
+  可以把该任务单独提高到 --batch 160 或 --batch 192，再观察 10~20 分钟。
+- 如果以后只能单卡同时双跑：
+  再退回 --batch 64，并保持 --num_workers 4 --prefetch_factor 2。
+
+1) M0：服务器正式基线版（已完成，不要覆盖）
+python -m pcm_gan.train 
+  --outdir pcm_gan_runs_full_stage1_seed42 
+  --dataset ddre33 --ddre33_mode 2ch_single --cond_onehot --resolution 15min 
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv 
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv 
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv 
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv 
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv 
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv 
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv 
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv 
+  --ddre33_static_cond --ddre33_date_cond 
+  --epochs 400 --batch 128 --lr 1e-4 --lr_d 2e-4 --d_steps 2 
+  --lambda_gp 1.0 --lambda_tail 0.08 --tail_qs 0.9,0.95,0.99 
+  --lambda_stats 0.05 --lambda_roll 0.10 --roll_win 8 
+  --lambda_acf 0.10 --acf_lags 6 --lambda_corr 0.02 
+  --lambda_wind_adv 1.5 --d_high_weight 0.30 
+  --val_ratio 0.20 --ema_decay 0.999 --ema_start_epoch 0 
+  --num_workers 4 --prefetch_factor 2 --train_metrics_every 100 --eval_every 10 
+  --extreme_resample --extreme_joint_channels 0,1 --extreme_q 0.95 --extreme_alpha 0.30 
+  --seed 42
+
+2) M1：仅开启 CurveCond（新跑，单独目录）
+python -m pcm_gan.train 
+  --outdir pcm_gan_runs_full_m1_curve_seed42 
+  --dataset ddre33 --ddre33_mode 2ch_single --cond_onehot --resolution 15min 
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv 
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv 
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv 
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv 
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv 
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv 
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv 
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv 
+  --ddre33_static_cond --ddre33_date_cond 
+  --ddre33_curve_cond --ddre33_curve_cond_norm none 
+  --epochs 400 --batch 128 --lr 1e-4 --lr_d 2e-4 --d_steps 2 
+  --lambda_gp 1.0 --lambda_tail 0.08 --tail_qs 0.9,0.95,0.99 
+  --lambda_stats 0.05 --lambda_roll 0.10 --roll_win 8 
+  --lambda_acf 0.10 --acf_lags 6 --lambda_corr 0.02 
+  --lambda_wind_adv 1.5 --d_high_weight 0.30 
+  --val_ratio 0.20 --ema_decay 0.999 --ema_start_epoch 0 
+  --num_workers 4 --prefetch_factor 2 --train_metrics_every 100 --eval_every 10 
+  --extreme_resample --extreme_joint_channels 0,1 --extreme_q 0.95 --extreme_alpha 0.30 
+  --seed 42
+
+3) M2：仅开启 EventLoss（新跑，单独目录）
+python -m pcm_gan.train 
+  --outdir pcm_gan_runs_full_m2_event_seed42 
+  --dataset ddre33 --ddre33_mode 2ch_single --cond_onehot --resolution 15min 
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv 
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv 
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv 
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv 
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv 
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv 
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv 
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv 
+  --ddre33_static_cond --ddre33_date_cond 
+  --epochs 400 --batch 128 --lr 1e-4 --lr_d 2e-4 --d_steps 2 
+  --lambda_gp 1.0 --lambda_tail 0.08 --tail_qs 0.9,0.95,0.99 
+  --lambda_stats 0.05 --lambda_roll 0.10 --roll_win 8 
+  --lambda_acf 0.10 --acf_lags 6 --lambda_corr 0.02 
+  --lambda_peak_evt 0.01 --lambda_ramp_evt 0.01 --lambda_active_evt 0.005 
+  --lambda_wind_adv 1.5 --d_high_weight 0.30 
+  --val_ratio 0.20 --ema_decay 0.999 --ema_start_epoch 0 
+  --num_workers 4 --prefetch_factor 2 --train_metrics_every 100 --eval_every 10 
+  --extreme_resample --extreme_joint_channels 0,1 --extreme_q 0.95 --extreme_alpha 0.30 
+  --seed 42
+
+4) M3：服务器保守增强版（已完成，不要覆盖）
+python -m pcm_gan.train 
+  --outdir pcm_gan_runs_full_stage2_seed42 
+  --dataset ddre33 --ddre33_mode 2ch_single --cond_onehot --resolution 15min 
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv 
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv 
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv 
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv 
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv 
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv 
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv 
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv 
+  --ddre33_static_cond --ddre33_date_cond 
+  --ddre33_curve_cond --ddre33_curve_cond_norm none 
+  --epochs 400 --batch 128 --lr 1e-4 --lr_d 2e-4 --d_steps 2 
+  --lambda_gp 1.0 --lambda_tail 0.08 --tail_qs 0.9,0.95,0.99 
+  --lambda_stats 0.05 --lambda_roll 0.10 --roll_win 8 
+  --lambda_acf 0.10 --acf_lags 6 --lambda_corr 0.02 
+  --lambda_peak_evt 0.01 --lambda_ramp_evt 0.01 --lambda_active_evt 0.005 
+  --lambda_wind_adv 1.5 --d_high_weight 0.30 
+  --val_ratio 0.20 --ema_decay 0.999 --ema_start_epoch 0 
+  --num_workers 4 --prefetch_factor 2 --train_metrics_every 100 --eval_every 10 
+  --extreme_resample --extreme_joint_channels 0,1 --extreme_q 0.95 --extreme_alpha 0.30 
+  --seed 42
+
+5) 三随机种子重复
+- 建议至少跑：
+  seed = 42, 123, 777
+- 对比指标时，汇报均值和标准差。
+
+
+五、服务器后台训练示例
+----------------------
+1) 启动前建议
+- 先确认环境正常：
+  nvidia-smi
+- 建议先单独启动基线版，观察 5~10 分钟，再启动增强版。
+- 建议先创建日志目录：
+  mkdir logs
+
+2) Windows CMD 双卡并行启动说明
+- 在 Windows CMD 中，可用 set CUDA_VISIBLE_DEVICES=0 或 1 固定训练进程使用哪一张卡。
+- 推荐方式：
+  基线版绑定 GPU 0，保守增强版绑定 GPU 1。
+- 建议分别开两个 CMD 窗口执行；也可以用 start 在后台各开一个窗口。
+
+3) 稳定基线后台命令（Windows CMD）
+start "pcm_stage1_gpu0" cmd /c "set CUDA_VISIBLE_DEVICES=0 && python -m pcm_gan.train ^
+  --outdir pcm_gan_runs_full_stage1_seed42 ^
+  --dataset ddre33 --ddre33_mode 2ch_single --cond_onehot --resolution 15min ^
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv ^
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv ^
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv ^
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv ^
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv ^
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv ^
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv ^
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv ^
+  --ddre33_static_cond --ddre33_date_cond ^
+  --epochs 400 --batch 128 --lr 1e-4 --lr_d 2e-4 --d_steps 2 ^
+  --lambda_gp 1.0 --lambda_tail 0.08 --tail_qs 0.9,0.95,0.99 ^
+  --lambda_stats 0.05 --lambda_roll 0.10 --roll_win 8 ^
+  --lambda_acf 0.10 --acf_lags 6 --lambda_corr 0.02 ^
+  --lambda_wind_adv 1.5 --d_high_weight 0.30 ^
+  --val_ratio 0.20 --ema_decay 0.999 --ema_start_epoch 0 ^
+  --num_workers 4 --prefetch_factor 2 --train_metrics_every 100 --eval_every 10 ^
+  --extreme_resample --extreme_joint_channels 0,1 --extreme_q 0.95 --extreme_alpha 0.30 ^
+  --seed 42 > logs\\train_stage1_seed42.log 2>&1"
+
+4) 保守增强版后台命令（Windows CMD）
+start "pcm_stage2_gpu1" cmd /c "set CUDA_VISIBLE_DEVICES=1 && python -m pcm_gan.train ^
+  --outdir pcm_gan_runs_full_stage2_seed42 ^
+  --dataset ddre33 --ddre33_mode 2ch_single --cond_onehot --resolution 15min ^
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv ^
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv ^
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv ^
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv ^
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv ^
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv ^
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv ^
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv ^
+  --ddre33_static_cond --ddre33_date_cond ^
+  --ddre33_curve_cond --ddre33_curve_cond_norm none ^
+  --epochs 400 --batch 128 --lr 1e-4 --lr_d 2e-4 --d_steps 2 ^
+  --lambda_gp 1.0 --lambda_tail 0.08 --tail_qs 0.9,0.95,0.99 ^
+  --lambda_stats 0.05 --lambda_roll 0.10 --roll_win 8 ^
+  --lambda_acf 0.10 --acf_lags 6 --lambda_corr 0.02 ^
+  --lambda_peak_evt 0.01 --lambda_ramp_evt 0.01 --lambda_active_evt 0.005 ^
+  --lambda_wind_adv 1.5 --d_high_weight 0.30 ^
+  --val_ratio 0.20 --ema_decay 0.999 --ema_start_epoch 0 ^
+  --num_workers 4 --prefetch_factor 2 --train_metrics_every 100 --eval_every 10 ^
+  --extreme_resample --extreme_joint_channels 0,1 --extreme_q 0.95 --extreme_alpha 0.30 ^
+  --seed 42 > logs\\train_stage2_seed42.log 2>&1"
+
+5) 训练中监控建议（Windows）
+- 查看 GPU：
+  nvidia-smi -l 5
+- 看日志末尾：
+  powershell -Command "Get-Content logs\\train_stage1_seed42.log -Wait"
+  powershell -Command "Get-Content logs\\train_stage2_seed42.log -Wait"
+
+
+六、生成与测试
+--------------
+1) 生成样本
+python -m pcm_gan.generate \
+  --ckpt pcm_gan_runs_full_stage2_seed42/pcm_gan_15min_best.pt \
+  --dataset ddre33 --resolution 15min --ddre33_mode 2ch_single --cond_onehot \
+  --ddre33_static_cond --ddre33_date_cond --ddre33_curve_cond --ddre33_curve_cond_norm none \
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv \
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv \
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv \
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv \
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv \
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv \
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv \
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv \
+  --num 128 --outdir pcm_gan_out/gen_stage2_seed42
+
+2) 生成并做 Real/Fake 对照图
+python -m pcm_gan.test \
+  --ckpt pcm_gan_runs_full_stage2_seed42/pcm_gan_15min_best.pt \
+  --dataset ddre33 --resolution 15min --ddre33_mode 2ch_single --cond_onehot \
+  --ddre33_static_cond --ddre33_date_cond --ddre33_curve_cond --ddre33_curve_cond_norm none \
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv \
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv \
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv \
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv \
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv \
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv \
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv \
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv \
+  --num 64 --outdir pcm_gan_test_out/test_stage2_seed42
+
+说明
+- generate/test/eval 会优先读取 G_ema。
+- 如果 checkpoint 中没有 G_ema，会自动回退到普通 G。
+
+
+七、评估命令
+------------
+1) 总体报告评估
+python -m pcm_gan.eval_report \
+  --ckpt pcm_gan_runs_full_stage2_seed42/pcm_gan_15min_best.pt \
+  --dataset ddre33 --resolution 15min --ddre33_mode 2ch_single --cond_onehot \
+  --ddre33_static_cond --ddre33_date_cond --ddre33_curve_cond --ddre33_curve_cond_norm none \
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv \
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv \
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv \
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv \
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv \
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv \
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv \
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv \
+  --num 256 --quantiles 0.1,0.5,0.9,0.95,0.99 \
+  --outdir pcm_gan_runs/eval_report_stage2_seed42
+
+2) 同标签包络评估
+python -m pcm_gan.eval_label_envelope \
+  --ckpt pcm_gan_runs_full_stage2_seed42/pcm_gan_15min_best.pt \
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv \
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv \
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv \
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv \
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv \
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv \
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv \
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv \
+  --ddre33_mode 2ch_single --cond_onehot --ddre33_date_cond --ddre33_static_cond \
+  --ddre33_curve_cond --ddre33_curve_cond_norm none \
+  --num_per_label 256 --min_count 64 --max_plots 12 --seed 42 \
+  --outdir pcm_gan_runs/eval_label_stage2_seed42
+
+3) 固定条件评估
+python -m pcm_gan.eval_ddre33 \
+  --ckpt pcm_gan_runs_full_stage2_seed42/pcm_gan_15min_best.pt \
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv \
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv \
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv \
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv \
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv \
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv \
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv \
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv \
+  --ddre33_mode 2ch_single --cond_onehot --ddre33_date_cond --ddre33_static_cond \
+  --ddre33_curve_cond --ddre33_curve_cond_norm none \
+  --num 128 --pv_climate 5 --wind_climate 3
+
+
+八、建议做的消融对照
+--------------------
+建议至少做 4 组：
+1) 基线
+- 不开 curve_cond
+- 不开事件损失
+
+2) 只开 curve_cond
+- --ddre33_curve_cond --ddre33_curve_cond_norm none
+
+3) 只开事件损失
+- --lambda_peak_evt 0.01 --lambda_ramp_evt 0.01 --lambda_active_evt 0.005
+
+4) 两者都开
+- 同时开 curve_cond 和事件损失
+
+建议统一
+- 同一份数据
+- 同一 seed 集合
+- 同一评估脚本
+
+
+九、训练完成后要检查什么
+------------------------
+1) 先看 metrics.csv
+- 是否同时存在 train 和 val 指标列
+- val_model_score 是否稳定下降
+
+2) 再看 checkpoint
+- 是否生成 pcm_gan_15min_best.pt
+- cfg 中 best_score_split 是否为 val
+
+3) 再看评估
+- q_err
+- ramp_std_err
+- acf_err
+- corr_err
+- label_envelope_metrics.csv 中各标签包络误差
+
+
+十、容易出错的地方
+------------------
+1) 训练和推理条件必须一致
+- 是否用了 --cond_onehot
+- 是否用了 --ddre33_date_cond
+- 是否用了 --ddre33_static_cond
+- 是否用了 --ddre33_curve_cond
+- 如果用了 curve_cond，推理/评估也要带同样的 --ddre33_curve_cond_norm
+
+2) 推荐保持 15min
+- 当前 DDRE-33 主线默认就是 15min / 96 点
+
+3) 正式主实验不要直接切到 4ch
+- 当前更推荐 2ch_single
+
+4) 已归一化 DDRE-33 数据上
+- 默认优先使用 --ddre33_curve_cond_norm none
+
+
+十一、Web 端说明
+----------------
+1) 启动
+python pcm_gan_web/app.py
+
+2) 说明
+- Web 端已经支持优先读取 G_ema。
+- 但第二阶段新增的所有训练开关，当前没有全部在 Web 表单中暴露。
+- 正式训练与正式评估，仍建议使用命令行。

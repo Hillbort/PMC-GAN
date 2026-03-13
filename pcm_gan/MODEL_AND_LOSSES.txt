@@ -1,0 +1,382 @@
+PCM-GAN 模型结构、损失函数与训练策略说明（2026-03 代码一致版）
+================================================================
+
+对应代码
+- 模型定义: pcm_gan/models.py
+- 数据构造: pcm_gan/data_synth.py
+- 损失函数: pcm_gan/losses.py
+- 训练流程: pcm_gan/train.py
+
+
+一、本文档适用范围与论文主线建议
+--------------------------------
+1) 当前最推荐的正式实验主线
+- 数据集: DDRE-33
+- 分辨率: 15min（96 点/天）
+- 模式: 2ch_single（PV18 + Wind22）
+- 条件: --cond_onehot --ddre33_date_cond --ddre33_static_cond
+- 可选增强: --ddre33_curve_cond --ddre33_curve_cond_norm none
+
+2) 关于 DDRE-33 数据归一化
+- DDRE-33 当前输入功率序列本身已经是归一化数据。
+- 在 load_ddre33_dataset(...) 中，训练/推理默认使用 normalize=False。
+- 也就是说，DDRE-33 的 x 数据不会在当前代码里再次做一轮全局 min-max 归一化。
+
+3) 关于 curve_cond
+- curve_cond 只是在条件向量 cond 末尾追加“曲线摘要控制特征”。
+- 它不修改原始功率序列 x，也不改变 mask。
+- 当前默认策略是 --ddre33_curve_cond_norm none。
+- 只有在显式指定 --ddre33_curve_cond_norm minmax 时，才会对新增的 curve_cond 特征做数据集级 min-max 归一化。
+
+4) 关于 4 通道模式
+- 4ch 模式在代码中是可运行的。
+- 但当前生成器输出约束和部分通道特定先验，主要是按“前两通道为一组 PV/Wind 配对实验”来调的。
+- 因此，论文主结果和服务器正式训练，建议优先使用 2ch_single 或 2ch_pairs。
+
+
+二、任务定义与张量约定
+----------------------
+1) 任务
+- 输入条件 cond 和随机噪声 z，生成日内多通道场景序列 x_fake。
+- 目标不是只拟合均值，而是同时拟合：
+  - 边际分布
+  - 极端分位数
+  - 时间相关结构
+  - 通道间耦合关系
+  - 极端事件形态
+
+2) 张量维度
+- B: batch size
+- T: 序列长度，15min 下 T=96
+- C: 输出通道数
+- D_cond: 条件维度
+
+3) 输入输出
+- z: (B, z_dim)，默认 z_dim=64
+- cond:
+  - 静态条件: (B, D_cond)
+  - 动态条件: (B, T, D_cond)
+- mask: (B, T, C) 或 (T, C)
+- G 输出 x_fake: (B, T, C)
+- D 输出 critic 分数: (B,)
+
+
+三、DDRE-33 条件构造方式
+------------------------
+1) 2ch_single / 2ch_pairs
+- 输出通道: [pv, wind]
+- one-hot 条件维度:
+  - PV 气候类别 6 维
+  - Wind 气候类别 4 维
+- 基础 cond_dim = 10
+
+2) 4ch
+- 输出通道: [pv18, pv33, wind22, wind25]
+- one-hot 条件维度:
+  - pv18 6 维
+  - pv33 6 维
+  - wind22 4 维
+  - wind25 4 维
+- 基础 cond_dim = 20
+
+3) 日期条件
+- 开启 --ddre33_date_cond 后，追加 day-of-year 的 sin/cos 两维。
+- 因此：
+  - 2ch one-hot + date: cond_dim = 12
+  - 4ch one-hot + date: cond_dim = 22
+
+4) 曲线控制条件 curve_cond
+- 开启 --ddre33_curve_cond 后，每个通道追加 4 个摘要特征：
+  - mean
+  - peak
+  - ramp_std
+  - active_ratio
+- 因此：
+  - 2ch 模式额外增加 8 维
+  - 4ch 模式额外增加 16 维
+- 典型总维度：
+  - 2ch + onehot + date + curve = 18
+  - 4ch + onehot + date + curve = 38
+
+5) static_cond
+- 开启 --ddre33_static_cond 时，cond 以 (B, D_cond) 存储。
+- 进入生成器/判别器后，会自动复制到时间维。
+- 这样可以减少显存占用，并保持条件在日内一致。
+
+
+四、Generator 结构（models.py: Generator）
+----------------------------------------
+1) 总体思想
+- 当前生成器采用 baseline + residual 的分解式结构：
+  x_hat = x_base(cond, time) + x_residual(z, cond, time)
+- baseline 分支负责学习相对稳定的典型日内轮廓。
+- residual 分支负责学习扰动、波动、局部偏移和随机性。
+
+2) 输入融合
+- z_proj: Linear(z_dim -> model_dim)
+- cond_proj: Linear(cond_dim -> model_dim)
+- time_proj: Linear(2 -> model_dim)
+- 三者相加形成主干隐表示 h。
+
+3) FiLM 条件调制
+- 默认开启 use_film。
+- film(cond) 输出 gamma 和 beta。
+- 对主干特征执行：
+  h <- h * (1 + gamma) + beta
+- 作用是让条件不只是加法注入，而是直接调制隐层幅值与偏置。
+
+4) baseline 分支
+- base_cond_proj(cond) + base_time_proj(time_feat)
+- 经 base_mlp 后，每个通道都有一个线性输出头。
+- baseline 分支不使用随机噪声，负责学习“在该条件下更确定的部分”。
+
+5) residual 主干
+- pre_conv:
+  - 两层 Conv1d(model_dim -> model_dim, k=3)
+  - 配合 GELU 激活
+- MHCBlock 堆叠:
+  - 默认 depth=4
+  - 每层包含 MHSA + 两层 MLP + 超连接映射
+- 每个通道使用独立 MLP 头和线性输出头，得到 x_residual。
+
+6) 通道混合与后处理
+- channel_mixer:
+  - 1x1 Conv1d
+  - 用于补充通道线性耦合
+- post_conv:
+  - depthwise Conv1d + pointwise Conv1d
+  - 以残差方式增强局部纹理和短时波动
+
+7) 输出约束与物理掩码
+- 当通道数 C >= 2 时：
+  - ch0, ch1 经过 sigmoid，约束到 [0,1]
+  - 其余通道经过 ReLU，保证非负
+- 最后再乘 PhysicsMask：
+  - 对 DDRE-33，mask 由对应通道是否大于 0 构造
+  - 对主线 2ch_single，这一步可保持 PV/Wind 有效时段结构
+
+8) 对论文主线的含义
+- 在 2ch_single 下，输出后处理与通道语义是完全一致的：
+  - ch0 = pv
+  - ch1 = wind
+- 这也是当前建议把 2ch_single 作为主结果配置的原因之一。
+
+
+五、Discriminator 结构（models.py: Discriminator）
+-------------------------------------------------
+1) 总体
+- 判别器不是单一分支，而是多分支 critic：
+  - joint 分支
+  - channel-wise 分支
+  - patch 分支
+  - diff 高频分支
+
+2) joint 分支
+- x 先经过 pre_conv。
+- 再与 cond_proj(cond) 和 time_proj(time_feat) 相加。
+- 送入若干 MHCBlock。
+- 通过 mean pooling 和 max pooling 聚合后，经 head 输出 joint score。
+
+3) channel-wise 分支
+- 每个通道单独经过小卷积网络。
+- 条件特征来自：
+  - channel_cond_proj(cond_mean)
+  - cond_conv(cond_seq)
+- 这一路保证“整体像”之外，单通道统计形态也要像。
+
+4) patch 多尺度分支
+- 通过 PatchScale 和平均池化进行多尺度局部判别。
+- 强化对局部尖峰、局部平滑程度和短时纹理的辨别能力。
+
+5) diff 高频分支
+- 对 x 做时间差分 x[t] - x[t-1]。
+- 提取高频变化特征并输出 diff_score。
+- 最终以 high_weight 加到判别总分中。
+- 这一支路对爬坡和突变非常关键。
+
+6) 最终输出
+- out = joint_score + channel_score + patch_score + high_weight * diff_score
+- 返回标量 critic 分数，用于 WGAN 训练。
+
+
+六、损失函数（losses.py + train.py）
+-----------------------------------
+1) 判别器损失
+- 采用 WGAN-GP：
+  L_D = E[D(fake)] - E[D(real)] + lambda_gp * GP
+- GP 为梯度惩罚，约束 critic 近似满足 1-Lipschitz。
+
+2) 生成器对抗损失
+- L_adv = -E[D(fake)]
+
+3) 尾部分位数损失
+- 函数: tail_quantile_loss
+- 默认多分位数:
+  - 0.9
+  - 0.95
+  - 0.99
+- 作用是增强极端区间拟合，减少“均值对了但尾部错误”的情况。
+
+4) 通道统计损失
+- pv_stats:
+  - 仅对 ch0 的白天有效时段做 mean/std 约束
+- wind_stats:
+  - 对 ch1 做 mean/std/ramp mean/ramp std 约束
+- 代码中先计算：
+  g_stats = pv_stats + lambda_wind_adv * wind_stats_raw
+- 然后总损失里再乘 lambda_stats
+- 因此风电统计项的有效权重是 lambda_stats * lambda_wind_adv
+
+5) 滚动统计损失
+- rolling_stats_loss
+- 通过局部时间窗的 rolling mean/std 对齐日内局部统计。
+- 默认窗口 roll_win=8。
+
+6) 自相关损失
+- acf_loss
+- 对 lag=1..acf_lags 的自相关系数做误差约束。
+- 默认 acf_lags=6。
+
+7) 相关矩阵损失
+- corr_matrix_loss
+- 对所有通道的相关矩阵做 L1 对齐。
+- 作用是保持通道间耦合关系。
+
+8) 事件级损失（第二阶段，可选）
+- peak_event_loss:
+  - 峰值幅值误差
+  - 峰值时刻误差
+- ramp_event_loss:
+  - 最大上爬坡误差
+  - 最大下爬坡误差
+- active_ratio_loss:
+  - 活跃时段占比误差
+- 这三项默认权重都是 0，属于显式可控增强项。
+
+9) 生成器总损失
+- 总体形式为：
+  L_G =
+      L_adv
+    + tail_weight * L_tail
+    + lambda_stats * L_stats
+    + lambda_roll * L_roll
+    + lambda_acf * L_acf
+    + lambda_corr * L_corr
+    + lambda_peak_evt * L_peak_evt
+    + lambda_ramp_evt * L_ramp_evt
+    + lambda_active_evt * L_active_evt
+
+10) 尾部损失升权策略
+- tail_weight 不是一开始就全权重介入。
+- 在前 30% 训练轮次中，按线性方式从 0 升到 lambda_tail。
+- 这样可以先稳定对抗训练，再逐步强化尾部拟合。
+
+
+七、训练稳定性与泛化增强（train.py）
+------------------------------------
+1) TTUR
+- 生成器学习率默认 lr_g = lr
+- 判别器学习率默认 lr_d = 2 * lr
+- 默认 Adam betas=(0.5, 0.9)
+
+2) D:G 更新比
+- 默认 d_steps=2
+- 每个 batch 先更新 D，再更新 G
+
+3) 极端样本重采样
+- extreme_resample 开启后，对训练集使用 WeightedRandomSampler
+- 风险分数由高分位功率和高分位爬坡共同构成
+- 对 DDRE-33 主线建议显式指定：
+  --extreme_joint_channels 0,1
+
+4) 分层 train/val 划分
+- 对 DDRE-33 one-hot 条件，会按标签组做分层切分
+- 这样验证集不会完全偏离训练集的标签分布
+- 默认 val_ratio=0.2
+
+5) EMA 生成器
+- 开启条件: 0 < ema_decay < 1
+- 默认 ema_decay=0.999，ema_start_epoch=0
+- 推理、测试、评估和 Web 端会优先使用 G_ema
+- 若旧 checkpoint 中没有 G_ema，则自动回退到普通 G
+
+6) Best checkpoint 选择
+- 当前 best checkpoint 不再按训练集分数选，而是按验证集分数选
+- 当前综合分数定义为：
+  model_score = 0.35 * q_err + 0.25 * acf_err + 0.2 * corr_err + 0.2 * ramp_std_err
+- 若验证集存在，则 best_score_split = val
+
+7) 指标记录
+- metrics.csv 同时记录训练集和验证集的：
+  - hist_err
+  - q_err
+  - ks
+  - w1
+  - std_err
+  - ramp_std_err
+  - acf_err
+  - corr_err
+  - peak_evt_err
+  - ramp_evt_err
+  - active_evt_err
+  - model_score / val_model_score
+
+8) checkpoint 内容
+- checkpoint 中保存：
+  - G
+  - D
+  - 可选 G_ema
+  - cfg
+- cfg 内记录：
+  - seq_len
+  - channels
+  - cond_dim
+  - z_dim
+  - use_baseline_residual
+  - x_min / x_max
+  - best_score
+  - best_score_split
+  - generator_state_preference
+  - train_params
+  - cond_stats
+
+
+八、当前配置的推荐用法
+----------------------
+1) 稳健主线
+- 先跑不带 curve_cond、不带事件损失的稳定基线。
+- 这是最适合正式服务器训练的第一组结果。
+
+2) 低风险增强
+- 如果基线稳定，再开启：
+  - --ddre33_curve_cond --ddre33_curve_cond_norm none
+  - --lambda_peak_evt 0.01
+  - --lambda_ramp_evt 0.01
+  - --lambda_active_evt 0.005
+- 这是当前第二阶段的保守增强配置。
+
+3) 不建议直接做的事
+- 不建议一开始把事件损失权重设得很大。
+- 不建议在已经归一化的 DDRE-33 主线上默认启用 curve_cond 的 minmax 归一化。
+- 不建议把 4ch 结果直接作为论文主结果。
+
+
+九、当前版本的边界
+------------------
+1) 还没有直接接入真实逐时/逐分钟气象驱动变量。
+- 当前主要是“气候标签 + 日期 + 曲线摘要条件”的条件生成。
+
+2) 还没有把风、光、负荷做成统一的源荷联合主线。
+- 目前主线仍以 PV/Wind 联合场景为主。
+
+3) Web 端已经能读取 EMA checkpoint。
+- 但第二阶段新增的所有高级训练开关，当前没有全部在 Web 表单里暴露。
+
+
+十、论文写作时建议如何表述
+--------------------------
+可直接概括为：
+- 本文采用条件式 baseline-residual 生成器与多分支判别器的对抗生成框架。
+- 在对抗损失之外，引入尾部分位数、滚动统计、自相关、相关矩阵及事件级约束，以同时保证边际分布、时间结构、通道耦合和极端事件形态的真实性。
+- 在训练策略上，采用 TTUR、极端样本重采样、分层验证集选模和 EMA 生成器，以提高训练稳定性与泛化能力。
+- 在 DDRE-33 已归一化数据集上，原始功率序列不再重复归一化；可选的 curve_cond 仅作为条件增强项接入，不改变原始场景数据本身。
