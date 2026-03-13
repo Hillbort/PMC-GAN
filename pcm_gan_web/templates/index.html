@@ -1,0 +1,937 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PCM-GAN 真实数据工作台</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Real Data Workflow</p>
+          <h1>PCM-GAN 真实数据训练与测试</h1>
+          <p class="sub">选择数据文件、训练参数与测试配置，在线运行并查看训练曲线与结果。</p>
+        </div>
+        <div class="chip">PCM-GAN</div>
+      </header>
+
+      <section class="panel grid-2">
+        <div class="panel-inner">
+          <h2>训练</h2>
+          <form method="post" class="grid">
+            <input type="hidden" name="action" value="train" />
+            <div class="field">
+              <label>数据集类型</label>
+              <select name="train_dataset" id="trainDatasetType">
+                <option value="real" {% if form_data.train_dataset=='real' %}selected{% endif %}>real</option>
+                <option value="ddre33" {% if form_data.train_dataset=='ddre33' %}selected{% endif %}>ddre33</option>
+              </select>
+            </div>
+            <div class="field full train-real-only">
+              <label>数据 CSV 路径</label>
+              <input type="text" name="train_data_csv" value="{{ form_data.train_data_csv }}" />
+            </div>
+            <div class="field">
+              <label>分辨率</label>
+              <select name="train_resolution">
+                <option value="hourly" {% if form_data.train_resolution=='hourly' %}selected{% endif %}>小时(24)</option>
+                <option value="15min" {% if form_data.train_resolution=='15min' %}selected{% endif %}>15 分钟(96)</option>
+                <option value="minute" {% if form_data.train_resolution=='minute' %}selected{% endif %}>分钟(1440)</option>
+              </select>
+            </div>
+            <div class="actions full">
+              <button type="button" id="refreshCkptBtn">刷新检查点</button>
+              <p class="hint">当前检查点数量：<strong>{{ checkpoints|length }}</strong></p>
+            </div>
+            <div class="field train-real-only">
+              <label>Mask 来源</label>
+              <select name="train_mask_source">
+                <option value="solar" {% if form_data.train_mask_source=='solar' %}selected{% endif %}>solar_power</option>
+                <option value="ghi" {% if form_data.train_mask_source=='ghi' %}selected{% endif %}>GHI</option>
+              </select>
+            </div>
+            <div class="field train-real-only">
+              <label>Cond 归一化</label>
+              <select name="cond_norm">
+                <option value="none" {% if form_data.cond_norm=='none' %}selected{% endif %}>不归一化</option>
+                <option value="minmax" {% if form_data.cond_norm=='minmax' %}selected{% endif %}>Min-Max</option>
+                <option value="zscore" {% if form_data.cond_norm=='zscore' %}selected{% endif %}>Z-Score</option>
+              </select>
+            </div>
+            <div class="field train-ddre-only">
+              <label>DDRE-33 模式</label>
+              <select name="train_ddre33_mode">
+                <option value="2ch_single" {% if form_data.train_ddre33_mode=='2ch_single' %}selected{% endif %}>2ch_single</option>
+                <option value="2ch_pairs" {% if form_data.train_ddre33_mode=='2ch_pairs' %}selected{% endif %}>2ch_pairs</option>
+                <option value="4ch" {% if form_data.train_ddre33_mode=='4ch' %}selected{% endif %}>4ch</option>
+              </select>
+            </div>
+            <div class="field train-ddre-only">
+              <label>Cond One-Hot</label>
+              <select name="train_cond_onehot">
+                <option value="on" {% if form_data.train_cond_onehot=='on' %}selected{% endif %}>on</option>
+                <option value="" {% if form_data.train_cond_onehot=='' %}selected{% endif %}>off</option>
+              </select>
+            </div>
+            <div class="field toggle train-ddre-only">
+              <label>日期条件（DOY sin/cos）</label>
+              <label class="switch">
+                <input type="checkbox" name="train_ddre33_date_cond" {% if form_data.train_ddre33_date_cond=='on' %}checked{% endif %} />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="field toggle train-ddre-only">
+              <label>静态 cond（省显存）</label>
+              <label class="switch">
+                <input type="checkbox" name="train_ddre33_static_cond" {% if form_data.train_ddre33_static_cond=='on' %}checked{% endif %} />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="field train-ddre-only">
+              <label>max_cols</label>
+              <input type="number" name="train_max_cols" value="{{ form_data.train_max_cols }}" min="0" />
+            </div>
+            <div class="field full train-ddre-only">
+              <label>PV18 CSV</label>
+              <input type="text" name="train_pv18_csv" value="{{ form_data.train_pv18_csv }}" />
+            </div>
+            <div class="field full train-ddre-only">
+              <label>PV33 CSV</label>
+              <input type="text" name="train_pv33_csv" value="{{ form_data.train_pv33_csv }}" />
+            </div>
+            <div class="field full train-ddre-only">
+              <label>Wind22 CSV</label>
+              <input type="text" name="train_wind22_csv" value="{{ form_data.train_wind22_csv }}" />
+            </div>
+            <div class="field full train-ddre-only">
+              <label>Wind25 CSV</label>
+              <input type="text" name="train_wind25_csv" value="{{ form_data.train_wind25_csv }}" />
+            </div>
+            <div class="field full train-ddre-only">
+              <label>PV18 Climate CSV</label>
+              <input type="text" name="train_pv18_labels_csv" value="{{ form_data.train_pv18_labels_csv }}" />
+            </div>
+            <div class="field full train-ddre-only">
+              <label>PV33 Climate CSV</label>
+              <input type="text" name="train_pv33_labels_csv" value="{{ form_data.train_pv33_labels_csv }}" />
+            </div>
+            <div class="field full train-ddre-only">
+              <label>Wind22 Climate CSV</label>
+              <input type="text" name="train_wind22_labels_csv" value="{{ form_data.train_wind22_labels_csv }}" />
+            </div>
+            <div class="field full train-ddre-only">
+              <label>Wind25 Climate CSV</label>
+              <input type="text" name="train_wind25_labels_csv" value="{{ form_data.train_wind25_labels_csv }}" />
+            </div>
+            <div class="field"><label>Epochs</label><input type="number" name="epochs" value="{{ form_data.epochs }}" min="1" /></div>
+            <div class="field"><label>Batch</label><input type="number" name="batch" value="{{ form_data.batch }}" min="1" /></div>
+            <div class="field"><label>学习率</label><input type="text" name="lr" value="{{ form_data.lr }}" /></div>
+            <div class="field"><label>z_dim</label><input type="number" name="z_dim" value="{{ form_data.z_dim }}" /></div>
+            <div class="field"><label>D 步数</label><input type="number" name="d_steps" value="{{ form_data.d_steps }}" /></div>
+            <div class="field"><label>λ_gp</label><input type="text" name="lambda_gp" value="{{ form_data.lambda_gp }}" /></div>
+            <div class="field"><label>λ_tailq</label><input type="text" name="lambda_tailq" value="{{ form_data.lambda_tailq }}" /></div>
+            <div class="field"><label>tail_q</label><input type="text" name="tail_q" value="{{ form_data.tail_q }}" /></div>
+            <div class="field"><label>λ_stats</label><input type="text" name="lambda_stats" value="{{ form_data.lambda_stats }}" /></div>
+            <div class="field"><label>保存间隔</label><input type="number" name="save_every" value="{{ form_data.save_every }}" /></div>
+            <div class="field"><label>输出目录</label><input type="text" name="outdir" value="{{ form_data.outdir }}" /></div>
+            <div class="field toggle">
+              <label>使用 venv 环境</label>
+              <label class="switch">
+                <input type="checkbox" name="train_use_venv" {% if form_data.train_use_venv=='on' %}checked{% endif %} />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="actions full">
+              <button type="submit">开始训练</button>
+              <p class="hint">训练在后台执行，页面会自动刷新训练曲线与日志。</p>
+            </div>
+          </form>
+        </div>
+        <div class="panel-inner">
+          <h2>测试与生成</h2>
+          <form method="post" class="grid">
+            <input type="hidden" name="action" value="test" />
+            <div class="field">
+              <label>数据集类型</label>
+              <select name="dataset" id="datasetType">
+                <option value="real" {% if form_data.dataset=='real' %}selected{% endif %}>real</option>
+                <option value="ddre33" {% if form_data.dataset=='ddre33' %}selected{% endif %}>ddre33</option>
+              </select>
+            </div>
+            <div class="actions full">
+              <button type="button" id="fillDdreBtn">一键填充 DDRE-33（2ch_single）</button>
+              <p class="hint">自动切换为 ddre33，设置 15min，并填写全集 8 个 CSV 路径。</p>
+            </div>
+            <div class="actions full">
+              <button type="button" id="fillDdreSubsetBtn">一键填充 DDRE-33 子集</button>
+              <p class="hint">自动切换为 ddre33 + 15min，并指向子集目录（含 date/static cond）。</p>
+            </div>
+            <div class="field ddre-only">
+              <label>DDRE-33 数据源</label>
+              <select name="ddre_data_source" id="ddreDataSource">
+                <option value="ororiginal_data" {% if form_data.ddre_data_source=='ororiginal_data' %}selected{% endif %}>全集 ororiginal_data</option>
+                <option value="ddre33_subset" {% if form_data.ddre_data_source=='ddre33_subset' %}selected{% endif %}>子集 ddre33_subset</option>
+              </select>
+            </div>
+            <div class="field full">
+              <label>模型检查点</label>
+              <select name="ckpt" id="ckptSelect" required>
+                {% for ckpt in checkpoints %}
+                  <option value="{{ ckpt }}" {% if selected == ckpt|string %}selected{% endif %}>
+                    {{ ckpt }}
+                  </option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="field full real-only">
+              <label>数据 CSV 路径</label>
+              <input type="text" name="test_data_csv" value="{{ form_data.test_data_csv }}" />
+            </div>
+            <div class="field real-only">
+              <label>分辨率</label>
+              <select name="test_resolution">
+                <option value="hourly" {% if form_data.test_resolution=='hourly' %}selected{% endif %}>小时(24)</option>
+                <option value="15min" {% if form_data.test_resolution=='15min' %}selected{% endif %}>15 分钟(96)</option>
+                <option value="minute" {% if form_data.test_resolution=='minute' %}selected{% endif %}>分钟(1440)</option>
+              </select>
+            </div>
+            <div class="field real-only">
+              <label>Mask 来源</label>
+              <select name="test_mask_source">
+                <option value="ghi" {% if form_data.test_mask_source=='ghi' %}selected{% endif %}>GHI</option>
+                <option value="solar" {% if form_data.test_mask_source=='solar' %}selected{% endif %}>solar_power</option>
+              </select>
+            </div>
+            <div class="field real-only">
+              <label>Cond 归一化</label>
+              <select name="cond_norm">
+                <option value="none" {% if form_data.cond_norm=='none' %}selected{% endif %}>不归一化</option>
+                <option value="minmax" {% if form_data.cond_norm=='minmax' %}selected{% endif %}>Min-Max</option>
+                <option value="zscore" {% if form_data.cond_norm=='zscore' %}selected{% endif %}>Z-Score</option>
+              </select>
+            </div>
+            <div class="field ddre-only">
+              <label>DDRE-33 模式</label>
+              <select name="ddre33_mode">
+                <option value="2ch_single" {% if form_data.ddre33_mode=='2ch_single' %}selected{% endif %}>2ch_single</option>
+                <option value="2ch_pairs" {% if form_data.ddre33_mode=='2ch_pairs' %}selected{% endif %}>2ch_pairs</option>
+                <option value="4ch" {% if form_data.ddre33_mode=='4ch' %}selected{% endif %}>4ch</option>
+              </select>
+            </div>
+            <div class="field ddre-only">
+              <label>Cond One-Hot</label>
+              <select name="cond_onehot">
+                <option value="on" {% if form_data.cond_onehot=='on' %}selected{% endif %}>on</option>
+                <option value="" {% if form_data.cond_onehot=='' %}selected{% endif %}>off</option>
+              </select>
+            </div>
+            <div class="field toggle ddre-only">
+              <label>日期条件（DOY sin/cos）</label>
+              <label class="switch">
+                <input type="checkbox" name="ddre33_date_cond" {% if form_data.ddre33_date_cond=='on' %}checked{% endif %} />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="field toggle ddre-only">
+              <label>静态 cond（省显存）</label>
+              <label class="switch">
+                <input type="checkbox" name="ddre33_static_cond" {% if form_data.ddre33_static_cond=='on' %}checked{% endif %} />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="field ddre-only">
+              <label>max_cols</label>
+              <input type="number" name="max_cols" value="{{ form_data.max_cols }}" min="0" />
+            </div>
+            <div class="field full ddre-only">
+              <label>PV18 CSV</label>
+              <input type="text" name="pv18_csv" value="{{ form_data.pv18_csv }}" data-default="{{ form_data.pv18_csv }}" />
+            </div>
+            <div class="field full ddre-only">
+              <label>PV33 CSV</label>
+              <input type="text" name="pv33_csv" value="{{ form_data.pv33_csv }}" data-default="{{ form_data.pv33_csv }}" />
+            </div>
+            <div class="field full ddre-only">
+              <label>Wind22 CSV</label>
+              <input type="text" name="wind22_csv" value="{{ form_data.wind22_csv }}" data-default="{{ form_data.wind22_csv }}" />
+            </div>
+            <div class="field full ddre-only">
+              <label>Wind25 CSV</label>
+              <input type="text" name="wind25_csv" value="{{ form_data.wind25_csv }}" data-default="{{ form_data.wind25_csv }}" />
+            </div>
+            <div class="field full ddre-only">
+              <label>PV18 Climate CSV</label>
+              <input type="text" name="pv18_labels_csv" value="{{ form_data.pv18_labels_csv }}" data-default="{{ form_data.pv18_labels_csv }}" />
+            </div>
+            <div class="field full ddre-only">
+              <label>PV33 Climate CSV</label>
+              <input type="text" name="pv33_labels_csv" value="{{ form_data.pv33_labels_csv }}" data-default="{{ form_data.pv33_labels_csv }}" />
+            </div>
+            <div class="field full ddre-only">
+              <label>Wind22 Climate CSV</label>
+              <input type="text" name="wind22_labels_csv" value="{{ form_data.wind22_labels_csv }}" data-default="{{ form_data.wind22_labels_csv }}" />
+            </div>
+            <div class="field full ddre-only">
+              <label>Wind25 Climate CSV</label>
+              <input type="text" name="wind25_labels_csv" value="{{ form_data.wind25_labels_csv }}" data-default="{{ form_data.wind25_labels_csv }}" />
+            </div>
+            <div class="field"><label>样本数</label><input type="number" name="num" value="{{ form_data.num }}" min="1" max="128" /></div>
+            <div class="field"><label>TopK候选数</label><input type="number" name="topk_candidates" value="{{ form_data.topk_candidates }}" min="1" max="64" /></div>
+            <div class="field"><label>TopK保留数</label><input type="number" name="topk_keep" value="{{ form_data.topk_keep }}" min="1" max="16" /></div>
+            <div class="field"><label>随机种子</label><input type="number" name="seed" value="{{ form_data.seed }}" /></div>
+            <div class="field toggle">
+              <label>反归一化输出</label>
+              <label class="switch">
+                <input type="checkbox" name="test_denorm" {% if form_data.test_denorm=='on' %}checked{% endif %} />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="field toggle">
+              <label>使用 venv 环境</label>
+              <label class="switch">
+                <input type="checkbox" name="test_use_venv" {% if form_data.test_use_venv=='on' %}checked{% endif %} />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="actions full">
+              <button type="submit">生成结果</button>
+              <p class="hint">条件来自真实数据随机采样，输出可选反归一化。</p>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      {% if error %}
+      <section class="panel error">
+        <strong>发生错误：</strong> {{ error }}
+      </section>
+      {% endif %}
+
+      {% if train_results.job_id %}
+      <section class="panel results">
+        <div class="results-head">
+          <h2>训练过程</h2>
+          <div class="meta">任务 ID：<code id="jobId">{{ train_results.job_id }}</code></div>
+        </div>
+        <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+        <div class="meta" id="trainStatusText">训练中...</div>
+        <div class="metrics" id="trainMetrics">
+          <div class="metric"><span>D</span><strong id="mD">-</strong></div>
+          <div class="metric"><span>G</span><strong id="mG">-</strong></div>
+          <div class="metric"><span>G_adv</span><strong id="mGadv">-</strong></div>
+          <div class="metric"><span>G_tailq</span><strong id="mGtail">-</strong></div>
+          <div class="metric"><span>solar</span><strong id="mSolar">-</strong></div>
+          <div class="metric"><span>wind</span><strong id="mWind">-</strong></div>
+          <div class="metric"><span>load</span><strong id="mLoad">-</strong></div>
+        </div>
+        <div class="actions"><button type="button" id="stopTrainBtn">停止训练</button></div>
+        <div class="chart-wrap"><canvas id="trainChart"></canvas></div>
+        <div class="log"><div class="log-title">训练日志</div><pre id="trainStdout"></pre><pre class="error-log" id="trainStderr"></pre></div>
+      </section>
+      {% endif %}
+
+      {% if results.run_dir %}
+      <section class="panel results">
+        <div class="results-head"><h2>测试结果</h2><div class="meta">结果目录：<code>{{ results.run_dir }}</code></div></div>
+        <div class="chart-wrap"><canvas id="sampleChart"></canvas></div>
+        <div class="cond-panel">
+          <div class="cond-head"><h3>条件向量 (cond)</h3><div class="cond-note">点击可编辑后重新生成</div></div>
+          <div class="cond-grid" id="condGrid"></div>
+          <div class="actions">
+            <button type="button" id="applyCondBtn">使用自定义 cond 重新生成</button>
+          </div>
+          <div class="cond-panel ddre-only" id="ddreCondPanel">
+            <div class="cond-head">
+              <h3>气候类别选择</h3>
+              <div class="cond-note">仅适用于 ddre33 + one-hot</div>
+            </div>
+            <div class="cond-grid">
+              <div class="cond-item">
+                <label>PV 气候(0-5)</label>
+                <input type="number" id="pvClimate" min="0" max="5" value="0" />
+              </div>
+              <div class="cond-item">
+                <label>Wind 气候(0-3)</label>
+                <input type="number" id="windClimate" min="0" max="3" value="0" />
+              </div>
+              <div class="cond-item">
+                <label>月份(1-12)</label>
+                <input type="number" id="dateMonth" min="1" max="12" value="1" />
+              </div>
+              <div class="cond-item">
+                <label>日期(1-31)</label>
+                <input type="number" id="dateDay" min="1" max="31" value="1" />
+              </div>
+            </div>
+            <div class="actions"><button type="button" id="applyClimateBtn">使用气候类别生成</button></div>
+          </div>
+        </div>
+        <div class="field"><label>选择样本</label><select id="sampleSelect"></select></div>
+        <div class="files"><h3>CSV 输出</h3><ul>{% for f in results.csv_files %}<li><a href="{{ url_for('serve_result', run=results.run_dir, filename=f) }}">{{ f }}</a></li>{% endfor %}</ul></div>
+        <div class="compare-panel">
+          <div class="compare-head"><h3>Real vs Fake（归一化/反归一化）</h3><div class="compare-note">选择索引（0 ~ N）</div></div>
+          <div class="compare-actions">
+            <input type="number" id="compareDayIdx" min="0" value="0" />
+            <button type="button" id="compareBtn">开始对比</button>
+            <button type="button" id="compareRandomBtn">随机对比</button>
+            <button type="button" id="compareClimatesBtn">一键生成并对比(10气候)</button>
+          </div>
+          <div class="hint" id="compareSummary">等待对比结果...</div>
+          <div class="field">
+            <label>气候场景</label>
+            <select id="climateCaseSelect"></select>
+          </div>
+          <div class="chart-grid">
+            <div class="chart-wrap"><canvas id="compareChartSolar"></canvas></div>
+            <div class="chart-wrap"><canvas id="compareChartWind"></canvas></div>
+            <div class="chart-wrap ddre-only"><canvas id="compareChartLoad"></canvas></div>
+          </div>
+        </div>
+      </section>
+      {% endif %}
+    </div>
+
+    {% if train_results.job_id %}
+    <script>
+      const jobId = "{{ train_results.job_id }}";
+      const ctxTrain = document.getElementById("trainChart").getContext("2d");
+      let trainChart = new Chart(ctxTrain, {
+        type: "line",
+        data: { labels: [], datasets: [
+          { label: "D Loss", data: [] },
+          { label: "G Loss", data: [] },
+        ]},
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { position: "bottom" } },
+          elements: { line: { tension: 0.25 } }
+        }
+      });
+
+      async function pollTrain() {
+        const res = await fetch(`/train_status/${jobId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const metrics = data.metrics || [];
+        const epochs = metrics.map(m => parseInt(m.epoch, 10));
+        const dLoss = metrics.map(m => parseFloat(m.d_loss));
+        const gLoss = metrics.map(m => parseFloat(m.g_loss));
+        trainChart.data.labels = epochs;
+        trainChart.data.datasets[0].data = dLoss;
+        trainChart.data.datasets[1].data = gLoss;
+        trainChart.update();
+
+        document.getElementById("trainStdout").textContent = data.stdout || "";
+        document.getElementById("trainStderr").textContent = data.stderr || "";
+        document.getElementById("trainStatusText").textContent =
+          `状态: ${data.status} | Epoch ${data.current_epoch}/${data.total_epochs} | 已用 ${data.elapsed}s | metrics.csv: ${data.metrics_path}`;
+
+        if (data.latest) {
+          const l = data.latest;
+          document.getElementById("mD").textContent = Number(l.d_loss || 0).toFixed(4);
+          document.getElementById("mG").textContent = Number(l.g_loss || 0).toFixed(4);
+          document.getElementById("mGadv").textContent = Number(l.g_adv || 0).toFixed(4);
+          document.getElementById("mGtail").textContent = Number(l.g_tailq || 0).toFixed(4);
+          if (l.solar_mean !== undefined) {
+            document.getElementById("mSolar").textContent = Number(l.solar_mean).toFixed(4);
+            document.getElementById("mWind").textContent = Number(l.wind_mean).toFixed(4);
+            document.getElementById("mLoad").textContent = Number(l.load_mean).toFixed(4);
+          } else if (l.pv_mean !== undefined) {
+            document.getElementById("mSolar").textContent = Number(l.pv_mean).toFixed(4);
+            document.getElementById("mWind").textContent = Number(l.wind_mean).toFixed(4);
+            document.getElementById("mLoad").textContent = Number(l.load_e_mean || 0).toFixed(4);
+          }
+        }
+
+        const bar = document.getElementById("progressBar");
+        if (data.status === "running") {
+          bar.style.width = `${data.progress_pct || 0}%`;
+          setTimeout(pollTrain, 3000);
+        } else {
+          bar.style.width = "100%";
+          refreshCheckpoints();
+        }
+      }
+
+      async function refreshCheckpoints() {
+        const res = await fetch("/checkpoints");
+        if (!res.ok) return;
+        const data = await res.json();
+        const sel = document.getElementById("ckptSelect");
+        if (!sel) return;
+        const current = sel.value;
+        sel.innerHTML = "";
+        data.checkpoints.forEach((ckpt) => {
+          const opt = document.createElement("option");
+          opt.value = ckpt;
+          opt.textContent = ckpt;
+          if (ckpt === current) opt.selected = true;
+          sel.appendChild(opt);
+        });
+      }
+
+      document.getElementById("stopTrainBtn").addEventListener("click", async () => {
+        const res = await fetch(`/train_stop/${jobId}`, { method: "POST" });
+        if (res.ok) {
+          document.getElementById("trainStatusText").textContent = "状态: stopping";
+          refreshCheckpoints();
+        }
+      });
+
+      pollTrain();
+    </script>
+    {% endif %}
+
+    {% if results.samples %}
+    <script>
+      const samples = {{ results.samples|tojson }};
+      const headers = {{ results.header|tojson }};
+      const conds = {{ results.conds|tojson }};
+      const testConfig = {
+        ckpt: document.getElementById("ckptSelect").value,
+        data_csv: {{ form_data.test_data_csv|tojson }},
+        dataset: {{ form_data.dataset|tojson }},
+        resolution: {{ form_data.test_resolution|tojson }},
+        mask_source: {{ form_data.test_mask_source|tojson }},
+        cond_norm: {{ form_data.cond_norm|tojson }},
+        denorm: document.querySelector('input[name="test_denorm"]').checked,
+        ddre33_mode: {{ form_data.ddre33_mode|tojson }},
+        ddre_data_source: {{ form_data.ddre_data_source|tojson }},
+        cond_onehot: {{ form_data.cond_onehot|tojson }} === "on",
+        ddre33_date_cond: {{ form_data.ddre33_date_cond|tojson }} === "on",
+        ddre33_static_cond: {{ form_data.ddre33_static_cond|tojson }} === "on",
+        max_cols: {{ form_data.max_cols|tojson }},
+        pv18_csv: {{ form_data.pv18_csv|tojson }},
+        pv33_csv: {{ form_data.pv33_csv|tojson }},
+        wind22_csv: {{ form_data.wind22_csv|tojson }},
+        wind25_csv: {{ form_data.wind25_csv|tojson }},
+        pv18_labels_csv: {{ form_data.pv18_labels_csv|tojson }},
+        pv33_labels_csv: {{ form_data.pv33_labels_csv|tojson }},
+        wind22_labels_csv: {{ form_data.wind22_labels_csv|tojson }},
+        wind25_labels_csv: {{ form_data.wind25_labels_csv|tojson }},
+      };
+      const ctx = document.getElementById("sampleChart").getContext("2d");
+      const labels = Array.from({length: samples[0].length}, (_, i) => i);
+      const datasetFor = (s) => headers.map((h, idx) => ({
+        label: h,
+        data: s.map(r => r[idx]),
+      }));
+      const chart = new Chart(ctx, {
+        type: "line",
+        data: { labels, datasets: datasetFor(samples[0]) },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { position: "bottom" } },
+          elements: { line: { tension: 0.25 } }
+        }
+      });
+      const sel = document.getElementById("sampleSelect");
+      samples.forEach((_, i) => {
+        const opt = document.createElement("option");
+        opt.value = i;
+        opt.textContent = `样本 ${i + 1}`;
+        sel.appendChild(opt);
+      });
+      sel.addEventListener("change", (e) => {
+        const s = samples[parseInt(e.target.value, 10)];
+        const ds = datasetFor(s);
+        chart.data.datasets.forEach((d, idx) => d.data = ds[idx].data);
+        chart.update();
+        renderCond(parseInt(e.target.value, 10));
+      });
+
+      function renderCond(idx) {
+        const grid = document.getElementById("condGrid");
+        grid.innerHTML = "";
+        const vec = conds[idx] || [];
+        vec.forEach((v, i) => {
+          const cell = document.createElement("div");
+          cell.className = "cond-item";
+          const label = document.createElement("label");
+          label.textContent = `c${i + 1}`;
+          const input = document.createElement("input");
+          input.type = "number";
+          input.step = "0.0001";
+          input.value = Number(v).toFixed(4);
+          input.dataset.idx = i;
+          cell.appendChild(label);
+          cell.appendChild(input);
+          grid.appendChild(cell);
+        });
+      }
+
+      renderCond(0);
+
+      document.getElementById("applyCondBtn").addEventListener("click", async () => {
+        const grid = document.getElementById("condGrid");
+        const inputs = grid.querySelectorAll("input");
+        const vec = Array.from(inputs).map(i => parseFloat(i.value));
+        const payload = {
+          ckpt: document.getElementById("ckptSelect").value,
+          cond: vec,
+          denorm: document.querySelector('input[name="test_denorm"]').checked
+        };
+        const res = await fetch("/custom_generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data.samples) return;
+        const s = data.samples[0];
+        const ds = datasetFor(s);
+        chart.data.datasets.forEach((d, idx) => d.data = ds[idx].data);
+        chart.update();
+      });
+
+      const applyClimateBtn = document.getElementById("applyClimateBtn");
+      if (applyClimateBtn) {
+        applyClimateBtn.addEventListener("click", async () => {
+          const payload = {
+            ckpt: document.getElementById("ckptSelect").value,
+            pv_climate: parseInt(document.getElementById("pvClimate").value, 10),
+            wind_climate: parseInt(document.getElementById("windClimate").value, 10),
+            date_month: parseInt(document.getElementById("dateMonth").value, 10),
+            date_day: parseInt(document.getElementById("dateDay").value, 10),
+            denorm: document.querySelector('input[name="test_denorm"]').checked
+          };
+          const res = await fetch("/custom_generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          if (!res.ok) return;
+          const data = await res.json();
+          if (!data.samples) return;
+          const s = data.samples[0];
+          const ds = datasetFor(s);
+          chart.data.datasets.forEach((d, idx) => d.data = ds[idx].data);
+          chart.update();
+        });
+      }
+
+      const compareSolar = new Chart(document.getElementById("compareChartSolar").getContext("2d"), {
+        type: "line",
+        data: { labels, datasets: [] },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { position: "bottom" } },
+          elements: { line: { tension: 0.25 } }
+        }
+      });
+      const compareWind = new Chart(document.getElementById("compareChartWind").getContext("2d"), {
+        type: "line",
+        data: { labels, datasets: [] },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { position: "bottom" } },
+          elements: { line: { tension: 0.25 } }
+        }
+      });
+      const compareLoad = new Chart(document.getElementById("compareChartLoad").getContext("2d"), {
+        type: "line",
+        data: { labels, datasets: [] },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { position: "bottom" } },
+          elements: { line: { tension: 0.25 } }
+        }
+      });
+      let compareTotalDays = null;
+      let climateCases = [];
+      const compareSummary = document.getElementById("compareSummary");
+
+      function setCompareSummary(text) {
+        if (compareSummary) compareSummary.textContent = text;
+      }
+
+      async function runCompare(dayIndex) {
+        const payload = { ...testConfig, day_index: dayIndex };
+        const res = await fetch("/compare_day", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          setCompareSummary(`对比失败: ${err.error || res.statusText}`);
+          return null;
+        }
+        const data = await res.json();
+        if (data.total_days !== undefined) {
+          compareTotalDays = data.total_days;
+          document.querySelector(".compare-note").textContent = `选择天索引（0 ~ ${data.total_days - 1}）`;
+        }
+        const real = data.real_norm;
+        const fake = data.fake_norm;
+        compareSolar.data.labels = labels;
+        compareSolar.data.datasets = [
+          { label: "solar (real)", data: real.map(r => r[0]) },
+          { label: "solar (fake)", data: fake.map(r => r[0]) },
+        ];
+        compareSolar.update();
+
+        compareWind.data.labels = labels;
+        compareWind.data.datasets = [
+          { label: "wind (real)", data: real.map(r => r[1]) },
+          { label: "wind (fake)", data: fake.map(r => r[1]) },
+        ];
+        compareWind.update();
+
+        if (real[0].length > 2) {
+          compareLoad.data.labels = labels;
+          compareLoad.data.datasets = [
+            { label: "load (real)", data: real.map(r => r[2]) },
+            { label: "load (fake)", data: fake.map(r => r[2]) },
+          ];
+          compareLoad.update();
+        } else {
+          compareLoad.data.datasets = [];
+          compareLoad.update();
+        }
+        const pvMae = Number(data.mae_pv || 0).toFixed(4);
+        const windMae = data.mae_wind === null || data.mae_wind === undefined ? "-" : Number(data.mae_wind).toFixed(4);
+        setCompareSummary(`Day ${data.day_index}: PV MAE=${pvMae}, Wind MAE=${windMae}`);
+        return data;
+      }
+
+      document.getElementById("compareBtn").addEventListener("click", async () => {
+        const dayIndex = parseInt(document.getElementById("compareDayIdx").value, 10);
+        await runCompare(dayIndex);
+      });
+
+      const compareRandomBtn = document.getElementById("compareRandomBtn");
+      if (compareRandomBtn) {
+        compareRandomBtn.addEventListener("click", async () => {
+          if (!compareTotalDays) {
+            const first = await runCompare(0);
+            if (!first || !compareTotalDays) return;
+          }
+          const idx = Math.floor(Math.random() * compareTotalDays);
+          document.getElementById("compareDayIdx").value = String(idx);
+          await runCompare(idx);
+        });
+      }
+
+      function renderClimateCases(cases) {
+        climateCases = cases || [];
+        const sel = document.getElementById("climateCaseSelect");
+        if (!sel) return;
+        sel.innerHTML = "";
+        climateCases.forEach((c, i) => {
+          const opt = document.createElement("option");
+          opt.value = i;
+          opt.textContent = c.name || `case ${i + 1}`;
+          sel.appendChild(opt);
+        });
+        if (climateCases.length > 0) {
+          sel.value = "0";
+          renderClimateCase(0);
+        }
+      }
+
+      function renderClimateCase(idx) {
+        const c = climateCases[idx];
+        if (!c) return;
+        const real = c.real || [];
+        const fake = c.fake || [];
+        compareSolar.data.labels = labels;
+        compareSolar.data.datasets = [
+          { label: "solar (real)", data: real.map(r => r[0]) },
+          { label: "solar (fake)", data: fake.map(r => r[0]) },
+        ];
+        compareSolar.update();
+        compareWind.data.labels = labels;
+        compareWind.data.datasets = [
+          { label: "wind (real)", data: real.map(r => r[1]) },
+          { label: "wind (fake)", data: fake.map(r => r[1]) },
+        ];
+        compareWind.update();
+        if (real[0] && real[0].length > 2) {
+          compareLoad.data.labels = labels;
+          compareLoad.data.datasets = [
+            { label: "load (real)", data: real.map(r => r[2]) },
+            { label: "load (fake)", data: fake.map(r => r[2]) },
+          ];
+          compareLoad.update();
+        } else {
+          compareLoad.data.datasets = [];
+          compareLoad.update();
+        }
+        const pvMae = c.mae_pv === null || c.mae_pv === undefined ? "-" : Number(c.mae_pv).toFixed(4);
+        const windMae = c.mae_wind === null || c.mae_wind === undefined ? "-" : Number(c.mae_wind).toFixed(4);
+        setCompareSummary(`${c.name} | sample=${c.sample_index} | PV MAE=${pvMae}, Wind MAE=${windMae}`);
+      }
+
+      const climateSelect = document.getElementById("climateCaseSelect");
+      if (climateSelect) {
+        climateSelect.addEventListener("change", (e) => {
+          renderClimateCase(parseInt(e.target.value, 10));
+        });
+      }
+
+      const compareClimatesBtn = document.getElementById("compareClimatesBtn");
+      if (compareClimatesBtn) {
+        compareClimatesBtn.addEventListener("click", async () => {
+          const payload = { ...testConfig, seed: document.querySelector('input[name="seed"]').value };
+          const res = await fetch("/compare_climates", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            setCompareSummary(`气候对比失败: ${err.error || res.statusText}`);
+            return;
+          }
+          const data = await res.json();
+          if (!data.cases) return;
+          renderClimateCases(data.cases);
+        });
+      }
+    </script>
+    {% endif %}
+
+    <script>
+      async function refreshCheckpointsManual() {
+        const res = await fetch("/checkpoints");
+        if (!res.ok) return;
+        const data = await res.json();
+        const sel = document.getElementById("ckptSelect");
+        if (!sel) return;
+        const current = sel.value;
+        sel.innerHTML = "";
+        data.checkpoints.forEach((ckpt) => {
+          const opt = document.createElement("option");
+          opt.value = ckpt;
+          opt.textContent = ckpt;
+          if (ckpt === current) opt.selected = true;
+          sel.appendChild(opt);
+        });
+      }
+      const refreshBtn = document.getElementById("refreshCkptBtn");
+      if (refreshBtn) {
+        refreshBtn.addEventListener("click", refreshCheckpointsManual);
+      }
+
+      function toggleDatasetFields() {
+        const ds = document.getElementById("datasetType");
+        if (!ds) return;
+        const isDDRE = ds.value === "ddre33";
+        document.querySelectorAll(".ddre-only").forEach(el => {
+          el.style.display = isDDRE ? "" : "none";
+        });
+        document.querySelectorAll(".real-only").forEach(el => {
+          el.style.display = isDDRE ? "none" : "";
+        });
+        const testCsv = document.querySelector('input[name="test_data_csv"]');
+        if (testCsv) {
+          if (isDDRE) {
+            testCsv.required = false;
+            const resSel = document.querySelector('select[name="test_resolution"]');
+            if (resSel && resSel.value !== "15min") {
+              resSel.value = "15min";
+            }
+          } else {
+            testCsv.required = true;
+          }
+        }
+      }
+      const dsSel = document.getElementById("datasetType");
+      if (dsSel) {
+        dsSel.addEventListener("change", toggleDatasetFields);
+        toggleDatasetFields();
+      }
+      const fillBtn = document.getElementById("fillDdreBtn");
+      function setCheckbox(name, checked) {
+        const el = document.querySelector(`input[name="${name}"]`);
+        if (el) el.checked = checked;
+      }
+      function setVal(name, value) {
+        const input = document.querySelector(`input[name="${name}"]`);
+        if (input) input.value = value;
+      }
+      function applyDdreSource(source) {
+        const ds = document.getElementById("datasetType");
+        if (ds) ds.value = "ddre33";
+        const mode = document.querySelector('select[name="ddre33_mode"]');
+        if (mode) mode.value = "2ch_single";
+        const onehot = document.querySelector('select[name="cond_onehot"]');
+        if (onehot) onehot.value = "on";
+        const sourceSel = document.getElementById("ddreDataSource");
+        if (sourceSel) sourceSel.value = source;
+        setCheckbox("ddre33_date_cond", true);
+        setCheckbox("ddre33_static_cond", true);
+        const resSel = document.querySelector('select[name="test_resolution"]');
+        if (resSel) resSel.value = "15min";
+        const maxCols = document.querySelector('input[name="max_cols"]');
+        if (maxCols && (!maxCols.value || maxCols.value === "0")) maxCols.value = "100";
+        if (source === "ddre33_subset") {
+          setVal("pv18_csv", "pcm_gan_data/ddre33_subset/node_18_PV.csv");
+          setVal("pv33_csv", "pcm_gan_data/ddre33_subset/node_33_PV.csv");
+          setVal("wind22_csv", "pcm_gan_data/ddre33_subset/node_22_wind.csv");
+          setVal("wind25_csv", "pcm_gan_data/ddre33_subset/node_25_wind.csv");
+          setVal("pv18_labels_csv", "pcm_gan_data/ddre33_subset/node_18_PV_labels_climate.csv");
+          setVal("pv33_labels_csv", "pcm_gan_data/ddre33_subset/node_33_PV_labels_climate.csv");
+          setVal("wind22_labels_csv", "pcm_gan_data/ddre33_subset/node_22_wind_labels.csv");
+          setVal("wind25_labels_csv", "pcm_gan_data/ddre33_subset/node_25_wind_labels.csv");
+        } else {
+          const names = [
+            "pv18_csv",
+            "pv33_csv",
+            "wind22_csv",
+            "wind25_csv",
+            "pv18_labels_csv",
+            "pv33_labels_csv",
+            "wind22_labels_csv",
+            "wind25_labels_csv",
+          ];
+          names.forEach((name) => {
+            const input = document.querySelector(`input[name="${name}"]`);
+            if (input && input.dataset && input.dataset.default) input.value = input.dataset.default;
+          });
+        }
+        toggleDatasetFields();
+      }
+      if (fillBtn) {
+        fillBtn.addEventListener("click", () => applyDdreSource("ororiginal_data"));
+      }
+      const fillSubsetBtn = document.getElementById("fillDdreSubsetBtn");
+      if (fillSubsetBtn) {
+        fillSubsetBtn.addEventListener("click", () => applyDdreSource("ddre33_subset"));
+      }
+      const ddreSourceSel = document.getElementById("ddreDataSource");
+      if (ddreSourceSel) {
+        ddreSourceSel.addEventListener("change", (e) => {
+          applyDdreSource(e.target.value || "ororiginal_data");
+        });
+      }
+
+      function toggleTrainDatasetFields() {
+        const ds = document.getElementById("trainDatasetType");
+        if (!ds) return;
+        const isDDRE = ds.value === "ddre33";
+        document.querySelectorAll(".train-ddre-only").forEach(el => {
+          el.style.display = isDDRE ? "" : "none";
+        });
+        document.querySelectorAll(".train-real-only").forEach(el => {
+          el.style.display = isDDRE ? "none" : "";
+        });
+      }
+      const trainSel = document.getElementById("trainDatasetType");
+      if (trainSel) {
+        trainSel.addEventListener("change", toggleTrainDatasetFields);
+        toggleTrainDatasetFields();
+      }
+    </script>
+  </body>
+</html>
