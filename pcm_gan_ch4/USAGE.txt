@@ -1,0 +1,185 @@
+PCM-GAN Chapter 4 使用说明
+==========================
+
+一、当前前端模式
+----------------
+`pcm_gan_ch4` 现在支持 3 种前端：
+
+1) `heuristic`
+- 不调用外部大模型
+- 使用本地“知识驱动代理前端”
+- 适合离线、无 API、先验证第四章流程
+
+2) `manual_json`
+- 你把提示词复制到网页大模型
+- 让网页大模型严格输出 JSON
+- 你把 JSON 保存成本地文件
+- 程序读取该 JSON，再调用 PCM-GAN 生成多日极端场景
+
+3) `deepseek_api`
+- 通过 OpenAI 兼容接口直接请求 DeepSeek
+- API 返回 JSON 计划
+- 程序自动接着做多日生成与边界拼接
+
+
+二、什么是“本地知识驱动代理前端”
+--------------------------------
+当前不是外部 LLM API，而是一个本地可运行的规则化代理：
+
+- 事件原型库：
+  `cold_snap / heatwave / typhoon / blizzard / rainstorm / calm_cloudy / dry_windy`
+- 关键词匹配：
+  从自然语言提示词中提取事件类型、季节和强度
+- 宏观冲突消解：
+  自动得到更合理的 `pv_label / wind_label`
+- 微观自回归规划：
+  每天生成 8 维 surrogate 条件
+  `[pv_mean, pv_peak, pv_ramp_std, pv_active_ratio, wind_mean, wind_peak, wind_ramp_std, wind_active_ratio]`
+
+也就是说：
+- 它是“可运行的论文前端代理”
+- 不是外部联网大模型
+- 但后续可以被 API 或网页 LLM 输出无缝替换
+
+
+三、最简单的本地模式
+--------------------
+python -m pcm_gan_ch4.run_orchestration \
+  --planner_mode heuristic \
+  --prompt "7-day severe cold snap with strong wind fluctuation" \
+  --days 7 \
+  --start_date 2025-12-15 \
+  --ckpt pcm_gan_runs_full_stage2_seed42/pcm_gan_15min_best.pt \
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv \
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv \
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv \
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv \
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv \
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv \
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv \
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv \
+  --outdir pcm_gan_ch4_runs/cold_snap_heuristic
+
+
+四、网页大模型手工模式
+----------------------
+1) 先导出手工提示词模板
+python -m pcm_gan_ch4.run_orchestration \
+  --planner_mode heuristic \
+  --prompt "7-day severe cold snap with strong wind fluctuation" \
+  --days 7 \
+  --start_date 2025-12-15 \
+  --prompt_template_out pcm_gan_ch4_runs/manual_prompt_cold_snap.txt \
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv \
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv \
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv \
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv \
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv \
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv \
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv \
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv \
+  --outdir pcm_gan_ch4_runs/template_only
+
+2) 把导出的提示词复制到网页大模型
+- 比如 DeepSeek 网页版、ChatGPT 网页版、Kimi 等
+- 必须要求其只输出 JSON
+
+3) 把网页大模型输出保存为 JSON
+- 比如保存为：
+  `pcm_gan_ch4_runs/manual_plan_cold_snap.json`
+
+4) 用该 JSON 驱动编排
+python -m pcm_gan_ch4.run_orchestration \
+  --planner_mode manual_json \
+  --manual_plan_json pcm_gan_ch4_runs/manual_plan_cold_snap.json \
+  --prompt "7-day severe cold snap with strong wind fluctuation" \
+  --days 7 \
+  --start_date 2025-12-15 \
+  --ckpt pcm_gan_runs_full_stage2_seed42/pcm_gan_15min_best.pt \
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv \
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv \
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv \
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv \
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv \
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv \
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv \
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv \
+  --outdir pcm_gan_ch4_runs/cold_snap_manual
+
+
+五、DeepSeek API 直连模式
+-------------------------
+重要说明
+- 不要把 API key 写进代码或文档
+- 推荐放到环境变量里
+
+PowerShell:
+`$env:DEEPSEEK_API_KEY="你的key"`
+
+Windows CMD:
+`set DEEPSEEK_API_KEY=你的key`
+
+示例命令：
+python -m pcm_gan_ch4.run_orchestration \
+  --planner_mode deepseek_api \
+  --api_model deepseek-chat \
+  --api_base_url https://api.deepseek.com/chat/completions \
+  --api_key_env DEEPSEEK_API_KEY \
+  --prompt "7-day severe cold snap with strong wind fluctuation" \
+  --days 7 \
+  --start_date 2025-12-15 \
+  --save_api_plan_json pcm_gan_ch4_runs/api_plan_cold_snap.json \
+  --ckpt pcm_gan_runs_full_stage2_seed42/pcm_gan_15min_best.pt \
+  --pv18_csv pcm_gan_data/ororiginal_data/node_18_PV.csv \
+  --pv33_csv pcm_gan_data/ororiginal_data/node_33_PV.csv \
+  --wind22_csv pcm_gan_data/ororiginal_data/node_22_wind.csv \
+  --wind25_csv pcm_gan_data/ororiginal_data/node_25_wind.csv \
+  --pv18_labels_csv pcm_gan_data/ororiginal_data/node_18_PV_labels_climate.csv \
+  --pv33_labels_csv pcm_gan_data/ororiginal_data/node_33_PV_labels_climate.csv \
+  --wind22_labels_csv pcm_gan_data/ororiginal_data/node_22_wind_labels.csv \
+  --wind25_labels_csv pcm_gan_data/ororiginal_data/node_25_wind_labels.csv \
+  --outdir pcm_gan_ch4_runs/cold_snap_api
+
+
+六、输出文件
+------------
+- `prompt_spec.json`
+- `macro_plan.json`
+- `daily_plan.csv`
+- `generation_trace.csv`
+- `multi_day_profile.csv`
+- `orchestration_summary.json`
+- `plots/micro_plan.png`
+- `plots/multi_day_profile.png`
+
+
+七、推荐流程
+------------
+推荐先按下面顺序走：
+
+1) 先跑 `heuristic`
+- 确认第四章整条链路通了
+
+2) 再用 `manual_json`
+- 你可以直接在网页大模型上人工调整第四章的宏观/微观计划
+
+3) 最后再切 `deepseek_api`
+- 把网页人工流程自动化
+
+
+八、注意事项
+------------
+1) 第四章前端只负责“计划”
+- 真正的日内曲线仍由 PCM-GAN 生成
+
+2) 没有 checkpoint 也能跑
+- 此时会进入 `reference_fallback`
+- 主要用于验证第四章逻辑，而不是正式结果
+
+3) 有 checkpoint 时
+- 会进入 `pcm_gan` 模式
+- 这才是论文第四章更完整的生成流程
+
+4) 手工 JSON 和 API JSON 都必须满足固定 schema
+- 建议直接使用同目录下的：
+  `MANUAL_LLM_PROMPT_TEMPLATE.txt`
